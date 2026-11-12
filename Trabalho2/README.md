@@ -44,6 +44,66 @@ O projeto mapeia os seguintes periféricos físicos configurados no arquivo `BOA
 | `switches<3:0>` | `T9` a `V8` | Modo Teste: Força a escolha de uma palavra específica (se $\neq$ 0000) |
 | `led<7:0>` | `W21` a `R20` | LEDs de depuração (Qtd. Erros, Atividade PS/2, Status Win/Lose)[cite: 8] |
 
+## 📊 Fluxograma
+
+```mermaid
+flowchart LR
+    classDef pin fill:#eceff1,stroke:#37474f,stroke-width:2px,color:#000,font-weight:bold;
+    classDef logic fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000;
+    classDef fsm fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000;
+    classDef peri fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#000;
+
+    subgraph IN_PINS ["Entradas (Spartan-3A)"]
+        CLK["clk (50 MHz)"]:::pin
+        BTN["rst / btn_in"]:::pin
+        SW["switches(3:0)"]:::pin
+        PS2["ps2_clk / ps2_data"]:::pin
+    end
+
+    subgraph PS2_SYS ["Subsistema de Teclado (PS/2)"]
+        RX["Receptor PS/2<br/>(Filtro + Deslocamento)"]:::peri
+        DEC["Decodificador<br/>(Make/Break Codes)"]:::peri
+    end
+
+    subgraph CORE ["Núcleo do Jogo (Forca)"]
+        LFSR["Gerador Aleatório<br/>(LFSR 8-bits)"]:::logic
+        ROM["Memória ROM<br/>(30 Palavras)"]:::logic
+        GAME["Controlador Principal<br/>(FSM do Jogo)"]:::fsm
+    end
+
+    subgraph OUT_SYS ["Subsistema de Saída"]
+        LCD_CTRL["Controlador LCD<br/>(Formatador + Driver)"]:::peri
+        LED_CTRL["Controlador de LEDs"]:::peri
+    end
+
+    subgraph OUT_PINS ["Saídas (Spartan-3A)"]
+        LCD["lcd_rs, lcd_e, lcd_db(7:4)"]:::pin
+        LED["led(7:0)"]:::pin
+    end
+
+    %% Conexões de Entrada
+    PS2 --> RX
+    RX ==>|"ps2_byte (8 bits)"| DEC
+    DEC ==>|"key_ascii, enter, letter"| GAME
+    BTN -->|"btn_pulse (Debounce)"| GAME
+    SW ==>|"Seleção (Modo Teste)"| GAME
+    
+    %% Conexões do Núcleo
+    LFSR ==>|"Semente (8 bits)"| GAME
+    GAME ==>|"word_idx (0 a 29)"| ROM
+    ROM ==>|"rom_word, rom_len"| GAME
+
+    %% Conexões de Saída
+    GAME ==>|"game_state, erros, secret, revealed"| LCD_CTRL
+    GAME ==>|"game_state, erros, ps2_valid"| LED_CTRL
+
+    LCD_CTRL ==>|"Barramento LCD"| LCD
+    LED_CTRL ==>|"Status"| LED
+    
+    %% Clock implícito tracejado
+    CLK -.-> RX & DEC & LFSR & GAME & LCD_CTRL & LED_CTRL
+```
+
 ---
 
 ## 🎮 Como Jogar
