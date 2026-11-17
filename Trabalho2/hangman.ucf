@@ -1,0 +1,36 @@
+#-- Hangman - Spartan-3A Starter Kit (XC3S700A-4FG484)
+#-- LCD and PS/2 pins taken from UG334 (Spartan-3A/3AN Starter Kit user guide)
+
+#-- Clock
+NET "clk" LOC = "E12" | IOSTANDARD = LVCMOS33;
+
+#-- Reset (BTN_EAST) and ENTER button (BTN_WEST)
+NET "rst"    LOC = "T16" | IOSTANDARD = LVCMOS33 | PULLDOWN;
+NET "btn_in" LOC = "U15" | IOSTANDARD = LVCMOS33 | PULLDOWN;
+
+#-- PS/2 keyboard (UG334 calls them PS2_CLK1 / PS2_DATA1)
+NET "ps2_clk"  LOC = "W12" | IOSTANDARD = LVTTL;
+NET "ps2_data" LOC = "V11" | IOSTANDARD = LVTTL;
+
+#-- LCD (4-bit mode, only DB7..DB4 are used)
+NET "lcd_e"     LOC = "AB4"  | IOSTANDARD = LVCMOS33 | DRIVE = 4 | SLEW = QUIETIO;
+NET "lcd_rs"    LOC = "Y14"  | IOSTANDARD = LVCMOS33 | DRIVE = 4 | SLEW = QUIETIO;
+NET "lcd_rw"    LOC = "W13"  | IOSTANDARD = LVCMOS33 | DRIVE = 4 | SLEW = QUIETIO;
+NET "lcd_db<7>" LOC = "Y15"  | IOSTANDARD = LVCMOS33 | DRIVE = 4 | SLEW = QUIETIO;
+NET "lcd_db<6>" LOC = "AB16" | IOSTANDARD = LVCMOS33 | DRIVE = 4 | SLEW = QUIETIO;
+NET "lcd_db<5>" LOC = "Y16"  | IOSTANDARD = LVCMOS33 | DRIVE = 4 | SLEW = QUIETIO;
+NET "lcd_db<4>" LOC = "AA12" | IOSTANDARD = LVCMOS33 | DRIVE = 4 | SLEW = QUIETIO;
+
+#-- LEDs
+NET "led<7>" LOC = "W21" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8;  #-- lose
+NET "led<6>" LOC = "Y22" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8;  #-- win
+NET "led<5>" LOC = "V20" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8;  #-- LCD ready
+NET "led<4>" LOC = "V19" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8;  #-- toggles on each key
+NET "led<3>" LOC = "U19" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8;  #-- playing
+NET "led<2>" LOC = "U20" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8;  #-- errors (MSB)
+NET "led<1>" LOC = "T19" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8;  #-- errors
+NET "led<0>" LOC = "R20" | IOSTANDARD = LVCMOS33 | SLEW = SLOW | DRIVE = 8;  #-- errors (LSB)
+
+#-- Timing
+NET "clk" TNM_NET = "clk";
+TIMESPEC TS_clk = PERIOD "clk" 20 ns HIGH 50%;

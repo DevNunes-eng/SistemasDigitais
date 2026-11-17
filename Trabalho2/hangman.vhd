@@ -1,137 +1,60 @@
 -- =========================================================================
--- HANGMAN GAME (FORCA) - SPARTAN-3A STARTER KIT (XC3S700A-4FG484)
---
--- Inputs : PS/2 keyboard (letters A-Z and ENTER), BTN_EAST (reset),
---          BTN_WEST (optional ENTER), switches (optional word selection)
--- Outputs: 16x2 character LCD (4-bit mode) and 8 LEDs
---
--- Everything is inside ONE entity and ONE architecture. Each section of the
--- architecture is an independent process, so the game FSM never waits for
--- the PS/2 receiver or for the LCD controller.
+-- Hangman (Forca) - 
+-- PS/2 keyboard in, 16x2 LCD + LEDs out. Everything in one file.
 -- =========================================================================
 
--- =========================================================================
--- 1. LIBRARIES AND ENTITY
--- =========================================================================
 library IEEE;
 
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.NUMERIC_STD.ALL;
 
 entity hangman is
-    generic (
-        SIM_FAST : boolean := false -- true ONLY in the testbench: shortens the long waits (20 ms, 5 ms...)
-    );
     port (
         -- INPUT
-        clk         : in  STD_LOGIC;                      -- 50 MHz board clock (20 ns period)
-        rst         : in  STD_LOGIC;                      -- BTN_EAST, active high (debounced inside)
-        btn_in      : in  STD_LOGIC;                      -- BTN_WEST, works as an extra ENTER key
-        switches    : in  STD_LOGIC_VECTOR(3 downto 0);   -- "0000" = random word, otherwise fixed word (test mode)
-        ps2_clk     : in  STD_LOGIC;                      -- PS/2 clock coming from the keyboard
-        ps2_data    : in  STD_LOGIC;                      -- PS/2 data coming from the keyboard
+        clk      : in  STD_LOGIC;                     -- 50 MHz clock
+        rst      : in  STD_LOGIC;                     -- BTN_EAST (active high)
+        btn_in   : in  STD_LOGIC;                     -- BTN_WEST, works like ENTER
+        ps2_clk  : in  STD_LOGIC;                     -- keyboard clock
+        ps2_data : in  STD_LOGIC;                     -- keyboard data
 
         -- OUTPUT
-        lcd_e       : out STD_LOGIC;                      -- LCD enable pulse
-        lcd_rs      : out STD_LOGIC;                      -- LCD register select (0 = command, 1 = data)
-        lcd_rw      : out STD_LOGIC;                      -- LCD read/write (always '0' = write)
-        lcd_db      : out STD_LOGIC_VECTOR(7 downto 4);   -- LCD data bus, 4-bit mode uses only DB7..DB4
-        led         : out STD_LOGIC_VECTOR(7 downto 0)    -- 8 status LEDs
+        lcd_e    : out STD_LOGIC;                     -- LCD enable
+        lcd_rs   : out STD_LOGIC;                     -- 0 = command, 1 = data
+        lcd_rw   : out STD_LOGIC;                     -- always 0 (write only)
+        lcd_db   : out STD_LOGIC_VECTOR(7 downto 4);  -- 4-bit mode: only DB7..DB4
+        led      : out STD_LOGIC_VECTOR(7 downto 0)
     );
 end hangman;
 
 architecture Behavioral of hangman is
 
-    -- =====================================================================
-    -- 2. CONSTANTS AND TYPES
-    -- =====================================================================
+    -- ---------------------------------------------------------------------
+    -- Constants and types
+    -- ---------------------------------------------------------------------
+    constant DEBOUNCE_MAX  : integer := 1_000_000;   -- 20 ms
+    constant PS2_TIMEOUT   : integer := 100_000;     -- 2 ms
+    constant NUM_WORDS     : integer := 30;
+    constant MAX_WORD_LEN  : integer := 10;
+    constant MAX_ERRORS    : integer := 6;
 
-    -- Helper used only for constants: picks the fast value when simulating
-    function sel_int (cond : boolean; a : integer; b : integer) return integer is
-    begin
-        if cond then
-            return a;
-        else
-            return b;
-        end if;
-    end function;
+    -- LCD waits, in clock cycles (the timer counts down to 0, so it is value+1)
+    constant LCD_POWER_ON   : integer := 1_000_000;  -- 20 ms
+    constant LCD_WAIT_5MS   : integer := 250_000;
+    constant LCD_WAIT_200US : integer := 10_000;
+    constant LCD_WAIT_100US : integer := 5_000;
+    constant LCD_WAIT_50US  : integer := 2_500;
+    constant LCD_WAIT_2MS   : integer := 100_000;
+    constant LCD_LAST_STEP  : integer := 41;
 
-    -- Converts a VHDL character to its 8-bit ASCII code
-    function chr (c : character) return std_logic_vector is
-    begin
-        return std_logic_vector(to_unsigned(character'pos(c), 8));
-    end function;
-
-    -- PS/2 scan code (set 2, make code) -> ASCII. Returns x"00" if the key is not used
-    function scan_to_ascii (sc : std_logic_vector(7 downto 0)) return std_logic_vector is
-    begin
-        case sc is
-            when x"1C" => return x"41"; -- A
-            when x"32" => return x"42"; -- B
-            when x"21" => return x"43"; -- C
-            when x"23" => return x"44"; -- D
-            when x"24" => return x"45"; -- E
-            when x"2B" => return x"46"; -- F
-            when x"34" => return x"47"; -- G
-            when x"33" => return x"48"; -- H
-            when x"43" => return x"49"; -- I
-            when x"3B" => return x"4A"; -- J
-            when x"42" => return x"4B"; -- K
-            when x"4B" => return x"4C"; -- L
-            when x"3A" => return x"4D"; -- M
-            when x"31" => return x"4E"; -- N
-            when x"44" => return x"4F"; -- O
-            when x"4D" => return x"50"; -- P
-            when x"15" => return x"51"; -- Q
-            when x"2D" => return x"52"; -- R
-            when x"1B" => return x"53"; -- S
-            when x"2C" => return x"54"; -- T
-            when x"3C" => return x"55"; -- U
-            when x"2A" => return x"56"; -- V
-            when x"1D" => return x"57"; -- W
-            when x"22" => return x"58"; -- X
-            when x"35" => return x"59"; -- Y
-            when x"1A" => return x"5A"; -- Z
-            when x"5A" => return x"0D"; -- ENTER (carriage return)
-            when others => return x"00"; -- anything else is ignored
-        end case;
-    end function;
-
-    -- General constants
-    constant DEBOUNCE_MAX   : integer := sel_int(SIM_FAST, 16, 1_000_000); -- 1,000,000 cycles = 20 ms
-    constant NUM_WORDS      : integer := 30;
-    constant MAX_WORD_LEN   : integer := 10;
-    constant MAX_ERRORS     : integer := 6;
-
-    -- PS/2 constants
-    constant PS2_TIMEOUT    : integer := 100_000;                          -- 2 ms without clock edge = frame aborted
-    constant KEY_LED_TIME   : integer := sel_int(SIM_FAST, 1_000, 4_000_000); -- LED activity stretch, ~80 ms
-
-    -- LCD timing constants (number of 50 MHz clock cycles). The timer counts down to 0,
-    -- so the real wait is (value + 1) cycles.
-    constant LCD_POWER_ON   : integer := sel_int(SIM_FAST, 200, 1_000_000); -- 20 ms (datasheet asks >15 ms)
-    constant LCD_WAIT_5MS   : integer := sel_int(SIM_FAST, 100, 250_000);   -- after 1st 0x3 (datasheet asks >4.1 ms)
-    constant LCD_WAIT_200US : integer := 10_000;                            -- after 2nd 0x3 (>100 us)
-    constant LCD_WAIT_100US : integer := 5_000;                             -- after 3rd 0x3 and 0x2 (>40 us)
-    constant LCD_WAIT_50US  : integer := 2_500;                             -- normal command / character (>40 us)
-    constant LCD_WAIT_2MS   : integer := sel_int(SIM_FAST, 100, 100_000);   -- clear display (>1.64 ms)
-    constant LCD_T_SETUP    : integer := 4;                                 -- RS/data stable before E rises (>40 ns)
-    constant LCD_T_EHIGH    : integer := 12;                                -- E high time, 13 cycles = 260 ns (>230 ns)
-    constant LCD_T_GAP      : integer := 50;                                -- 1 us after E falls
-    constant LCD_LAST_STEP  : integer := 41;                                -- last step of the refresh sequence
-
-    constant BLINK_BIT      : integer := sel_int(SIM_FAST, 17, 26);         -- bit of blink counter, ~1.3 s period/2
-
-    -- Types
     type game_state_type is (S_INIT, S_IDLE, S_NEW_GAME, S_LOAD_WORD, S_PLAYING, S_WIN, S_LOSE);
     type lcd_state_type  is (L_POWER_ON, L_LOAD, L_SETUP, L_E_HIGH, L_E_LOW, L_WAIT);
 
-    type word_rom_type   is array (0 to NUM_WORDS-1) of string(1 to MAX_WORD_LEN);
-    type len_rom_type    is array (0 to NUM_WORDS-1) of integer range 0 to MAX_WORD_LEN;
-    type secret_type     is array (0 to MAX_WORD_LEN-1) of std_logic_vector(7 downto 0);
-    type lcd_buf_type    is array (0 to 31) of std_logic_vector(7 downto 0); -- 2 lines x 16 chars
+    type word_rom_type is array (0 to NUM_WORDS-1) of string(1 to MAX_WORD_LEN);
+    type len_rom_type  is array (0 to NUM_WORDS-1) of integer range 0 to MAX_WORD_LEN;
+    type secret_type   is array (0 to MAX_WORD_LEN-1) of std_logic_vector(7 downto 0);
+    type lcd_buf_type  is array (0 to 31) of std_logic_vector(7 downto 0);
 
-    -- Word database (read by the logic of section 8). Each word is padded with spaces up to 10 chars
+    -- words padded with spaces up to 10 chars
     constant WORD_ROM : word_rom_type := (
         "FPGA      ",   --  0
         "CIRCUITO  ",   --  1
@@ -165,50 +88,83 @@ architecture Behavioral of hangman is
         "LOGICA    "    -- 29
     );
 
-    -- Real length of each word above (same order)
+    -- real size of each word, same order as above
     constant LEN_ROM : len_rom_type := (
          4,  8,  8,  7,  7,  7,  7,  6,  8,  8,
          8,  7,  7,  8,  6, 10, 10, 10,  8, 10,
-         9,  8,  9, 10,  8,  5, 10,  9,  9,  6
+         9,  8,  9, 10,  8,  6, 10,  9,  9,  6
     );
 
-    -- Fixed LCD messages, always exactly 16 characters
+    -- screen messages (16 chars each)
     constant MSG_TITLE   : string(1 to 16) := "      FORCA     ";
     constant MSG_PRESS   : string(1 to 16) := "ENTER P/ INICIAR";
     constant MSG_WIN     : string(1 to 16) := "  VOCE VENCEU!  ";
     constant MSG_LOSE    : string(1 to 16) := "  VOCE PERDEU!  ";
     constant MSG_NEWGAME : string(1 to 16) := "ENTER: NOVO JOGO";
-    constant MSG_ERRORS  : string(1 to 16) := "ERROS: 00/06 [ ]"; -- error digit and last letter are overwritten
-    constant MSG_ANSWER  : string(1 to 16) := "ERA:            "; -- the secret word is written after "ERA: "
+    constant MSG_ERRORS  : string(1 to 16) := "ERROS: 00/06 [ ]";  -- digit and letter get overwritten
+    constant MSG_ANSWER  : string(1 to 16) := "ERA:            ";  -- word goes after "ERA: "
 
-    -- =====================================================================
-    -- 3. INTERNAL SIGNALS
-    -- =====================================================================
+    -- char -> ASCII code
+    function chr (c : character) return std_logic_vector is
+    begin
+        return std_logic_vector(to_unsigned(character'pos(c), 8));
+    end function;
 
-    -- Reset button (synchronizer + debouncer)
-    signal rst_sync       : std_logic_vector(1 downto 0) := (others => '0');
-    signal rst_stable     : std_logic := '0';
-    signal rst_cnt        : integer range 0 to DEBOUNCE_MAX := 0;
-    signal rst_int        : std_logic := '0';  -- clean reset used by every process
+    -- PS/2 scan code set 2 -> ASCII, x"00" if the key is not used
+    function scan_to_ascii (sc : std_logic_vector(7 downto 0)) return std_logic_vector is
+    begin
+        case sc is
+            when x"1C" => return x"41";  -- A
+            when x"32" => return x"42";  -- B
+            when x"21" => return x"43";  -- C
+            when x"23" => return x"44";  -- D
+            when x"24" => return x"45";  -- E
+            when x"2B" => return x"46";  -- F
+            when x"34" => return x"47";  -- G
+            when x"33" => return x"48";  -- H
+            when x"43" => return x"49";  -- I
+            when x"3B" => return x"4A";  -- J
+            when x"42" => return x"4B";  -- K
+            when x"4B" => return x"4C";  -- L
+            when x"3A" => return x"4D";  -- M
+            when x"31" => return x"4E";  -- N
+            when x"44" => return x"4F";  -- O
+            when x"4D" => return x"50";  -- P
+            when x"15" => return x"51";  -- Q
+            when x"2D" => return x"52";  -- R
+            when x"1B" => return x"53";  -- S
+            when x"2C" => return x"54";  -- T
+            when x"3C" => return x"55";  -- U
+            when x"2A" => return x"56";  -- V
+            when x"1D" => return x"57";  -- W
+            when x"22" => return x"58";  -- X
+            when x"35" => return x"59";  -- Y
+            when x"1A" => return x"5A";  -- Z
+            when x"5A" => return x"0D";  -- ENTER
+            when others => return x"00";
+        end case;
+    end function;
 
-    -- BTN_WEST (synchronizer + debouncer + pulse)
-    signal btn_sync       : std_logic_vector(1 downto 0) := (others => '0');
-    signal btn_stable     : std_logic := '0';
-    signal btn_prev       : std_logic := '0';
-    signal btn_pulse      : std_logic := '0';
-    signal btn_cnt        : integer range 0 to DEBOUNCE_MAX := 0;
+    -- ---------------------------------------------------------------------
+    -- Signals
+    -- ---------------------------------------------------------------------
+    -- reset and button debounce
+    signal rst_sync    : std_logic_vector(1 downto 0) := "00";
+    signal rst_int     : std_logic := '0';                 -- debounced reset used everywhere
+    signal rst_cnt     : integer range 0 to DEBOUNCE_MAX := 0;
+    signal btn_sync    : std_logic_vector(1 downto 0) := "00";
+    signal btn_stable  : std_logic := '0';
+    signal btn_prev    : std_logic := '0';
+    signal btn_pulse   : std_logic := '0';
+    signal btn_cnt     : integer range 0 to DEBOUNCE_MAX := 0;
 
-    -- Switches synchronizer
-    signal sw_sync0       : std_logic_vector(3 downto 0) := (others => '0');
-    signal sw_sync1       : std_logic_vector(3 downto 0) := (others => '0');
-
-    -- PS/2 synchronizer and clock filter
-    signal ps2_clk_sync   : std_logic_vector(1 downto 0) := (others => '1');
-    signal ps2_data_sync  : std_logic_vector(1 downto 0) := (others => '1');
-    signal ps2_clk_hist   : std_logic_vector(7 downto 0) := (others => '1');
-    signal ps2_clk_filt   : std_logic := '1';
-    signal ps2_clk_prev   : std_logic := '1';
-    signal ps2_fall       : std_logic := '0';
+    -- PS/2 input
+    signal ps2_clk_sync  : std_logic_vector(1 downto 0) := "11";
+    signal ps2_data_sync : std_logic_vector(1 downto 0) := "11";
+    signal ps2_clk_hist  : std_logic_vector(7 downto 0) := (others => '1');
+    signal ps2_clk_filt  : std_logic := '1';
+    signal ps2_clk_prev  : std_logic := '1';
+    signal ps2_fall      : std_logic;
 
     -- PS/2 receiver
     signal ps2_bit_cnt    : integer range 0 to 10 := 0;
@@ -219,79 +175,64 @@ architecture Behavioral of hangman is
     signal ps2_byte       : std_logic_vector(7 downto 0) := (others => '0');
     signal ps2_byte_valid : std_logic := '0';
 
-    -- Keyboard decoder
-    signal kbd_break      : std_logic := '0';  -- '1' after F0 (next code is a key release)
-    signal kbd_ext        : std_logic := '0';  -- '1' after E0 (extended key, ignored)
-    signal kbd_held       : std_logic := '0';  -- '1' while the last accepted key is still pressed
-    signal kbd_held_code  : std_logic_vector(7 downto 0) := (others => '0');
-    signal key_valid      : std_logic := '0';  -- 1-cycle pulse: a new key was pressed
-    signal key_ascii      : std_logic_vector(7 downto 0) := (others => '0');
-    signal enter_evt      : std_logic := '0';
-    signal letter_evt     : std_logic := '0';
+    -- keyboard decoder
+    signal kbd_break     : std_logic := '0';   -- last byte was F0
+    signal kbd_ext       : std_logic := '0';   -- last byte was E0
+    signal kbd_held      : std_logic := '0';   -- a key is still pressed
+    signal kbd_held_code : std_logic_vector(7 downto 0) := (others => '0');
+    signal key_valid     : std_logic := '0';   -- 1 cycle pulse per key press
+    signal key_ascii     : std_logic_vector(7 downto 0) := (others => '0');
+    signal enter_evt     : std_logic;
+    signal letter_evt    : std_logic;
 
-    -- LFSR
-    signal lfsr           : std_logic_vector(7 downto 0) := x"A5"; -- must never be all zeros
+    signal lfsr : std_logic_vector(7 downto 0) := x"A5";
 
-    -- Word database output
-    signal rom_word       : string(1 to MAX_WORD_LEN);
-    signal rom_len        : integer range 0 to MAX_WORD_LEN := 0;
+    -- word rom output
+    signal rom_word : string(1 to MAX_WORD_LEN);
+    signal rom_len  : integer range 0 to MAX_WORD_LEN;
 
-    -- Game controller
-    signal game_state     : game_state_type := S_INIT;
-    signal secret         : secret_type := (others => x"20");
-    signal secret_len     : integer range 0 to MAX_WORD_LEN := 0;
-    signal revealed       : std_logic_vector(MAX_WORD_LEN-1 downto 0) := (others => '0');
-    signal used_letters   : std_logic_vector(25 downto 0) := (others => '0'); -- bit 0 = A ... bit 25 = Z
-    signal error_cnt      : integer range 0 to MAX_ERRORS := 0;
-    signal last_letter    : std_logic_vector(7 downto 0) := x"20";
-    signal rand_val       : integer range 0 to 255 := 0;
-    signal word_idx       : integer range 0 to NUM_WORDS-1 := 0;
+    -- game
+    signal game_state   : game_state_type := S_INIT;
+    signal secret       : secret_type := (others => x"20");
+    signal secret_len   : integer range 0 to MAX_WORD_LEN := 0;
+    signal revealed     : std_logic_vector(MAX_WORD_LEN-1 downto 0) := (others => '0');
+    signal used_letters : std_logic_vector(25 downto 0) := (others => '0');  -- bit 0 = A
+    signal error_cnt    : integer range 0 to MAX_ERRORS := 0;
+    signal last_letter  : std_logic_vector(7 downto 0) := x"20";
+    signal rand_val     : integer range 0 to 255 := 0;
+    signal word_idx     : integer range 0 to NUM_WORDS-1 := 0;
 
-    -- LCD controller
-    signal lcd_buf        : lcd_buf_type := (others => x"20");
-    signal lcd_state      : lcd_state_type := L_POWER_ON;
-    signal lcd_timer      : integer range 0 to 1_000_000 := LCD_POWER_ON;
-    signal lcd_seq        : integer range 0 to LCD_LAST_STEP := 0;
-    signal lcd_phase_low  : std_logic := '0';  -- '0' = sending high nibble, '1' = low nibble
-    signal lcd_nib_only   : std_logic := '0';  -- '1' = only the high nibble is sent (init sequence)
-    signal lcd_tx_byte    : std_logic_vector(7 downto 0) := (others => '0');
-    signal lcd_tx_rs      : std_logic := '0';
-    signal lcd_tx_wait    : integer range 0 to 1_000_000 := 0;
-    signal lcd_ready      : std_logic := '0';
-    signal lcd_e_r        : std_logic := '0';
-    signal lcd_rs_r       : std_logic := '0';
-    signal lcd_data_r     : std_logic_vector(7 downto 4) := (others => '0');
-    signal blink_cnt      : unsigned(26 downto 0) := (others => '0');
+    -- LCD
+    signal lcd_buf       : lcd_buf_type := (others => x"20");
+    signal lcd_state     : lcd_state_type := L_POWER_ON;
+    signal lcd_timer     : integer range 0 to 1_000_000 := LCD_POWER_ON;
+    signal lcd_seq       : integer range 0 to LCD_LAST_STEP := 0;
+    signal lcd_phase_low : std_logic := '0';   -- 0 = high nibble, 1 = low nibble
+    signal lcd_nib_only  : std_logic := '0';   -- init steps send only one nibble
+    signal lcd_tx_byte   : std_logic_vector(7 downto 0) := (others => '0');
+    signal lcd_tx_rs     : std_logic := '0';
+    signal lcd_tx_wait   : integer range 0 to 1_000_000 := 0;
+    signal lcd_ready     : std_logic := '0';
+    signal blink_cnt     : unsigned(26 downto 0) := (others => '0');
 
-    -- LEDs
-    signal led_reg        : std_logic_vector(7 downto 0) := (others => '0');
-    signal key_led_cnt    : integer range 0 to 4_000_000 := 0;
+    signal key_led : std_logic := '0';
 
 begin
 
-    -- =====================================================================
-    -- 3.1 RESET BUTTON AND BTN_WEST (conventional synchronizer + debouncer)
-    --     The debouncer is used ONLY on mechanical buttons, never on PS/2.
-    -- =====================================================================
-
-    -- Reset: two flip-flop synchronizer
-    p_rst_sync : process(clk)
+    -- ---------------------------------------------------------------------
+    -- Reset and BTN_WEST: 2 FF synchronizer + 20 ms debouncer
+    -- (the reset debouncer has no reset, it would depend on itself)
+    -- ---------------------------------------------------------------------
+    process(clk)
     begin
         if rising_edge(clk) then
             rst_sync(0) <= rst;
             rst_sync(1) <= rst_sync(0);
-        end if;
-    end process p_rst_sync;
 
-    -- Reset: the new level is accepted only after 20 ms without changes.
-    -- (This block has no reset itself, otherwise it would depend on its own output.)
-    p_rst_debounce : process(clk)
-    begin
-        if rising_edge(clk) then
-            if rst_sync(1) /= rst_stable then
+            if rst_sync(1) /= rst_int then
                 if rst_cnt = DEBOUNCE_MAX then
-                    rst_stable <= rst_sync(1);
-                    rst_cnt    <= 0;
+                    rst_int <= rst_sync(1);
+                    rst_cnt <= 0;
                 else
                     rst_cnt <= rst_cnt + 1;
                 end if;
@@ -299,16 +240,13 @@ begin
                 rst_cnt <= 0;
             end if;
         end if;
-    end process p_rst_debounce;
+    end process;
 
-    rst_int <= rst_stable;
-
-    -- BTN_WEST: synchronizer, debouncer and rising-edge pulse
-    p_btn : process(clk)
+    process(clk)
     begin
         if rising_edge(clk) then
             if rst_int = '1' then
-                btn_sync   <= (others => '0');
+                btn_sync   <= "00";
                 btn_stable <= '0';
                 btn_prev   <= '0';
                 btn_pulse  <= '0';
@@ -329,45 +267,32 @@ begin
                 end if;
 
                 btn_prev  <= btn_stable;
-                btn_pulse <= btn_stable and (not btn_prev); -- 0 -> 1 edge
+                btn_pulse <= btn_stable and (not btn_prev);  -- rising edge
             end if;
         end if;
-    end process p_btn;
+    end process;
 
-    -- Switches only need synchronization (they are static)
-    p_sw_sync : process(clk)
-    begin
-        if rising_edge(clk) then
-            sw_sync0 <= switches;
-            sw_sync1 <= sw_sync0;
-        end if;
-    end process p_sw_sync;
-
-    -- =====================================================================
-    -- 4. PS/2 SYNCHRONIZER
-    --    PS2_CLK and PS2_DATA are asynchronous to the 50 MHz clock, so each one goes
-    --    through 2 flip-flops. PS2_CLK also passes through a small glitch filter:
-    --    the filtered clock only changes after 8 equal samples (160 ns). The PS/2
-    --    clock is only 10-16 kHz (period >= 60 us), so this delay is harmless.
-    --    NO 20 ms debouncer here: it would swallow the whole serial frame.
-    -- =====================================================================
-    p_ps2_sync : process(clk)
+    -- ---------------------------------------------------------------------
+    -- PS/2 synchronizer
+    -- 2 FFs on each line, plus a small glitch filter on the clock (it only
+    -- changes after 8 equal samples = 160 ns). No 20 ms debouncer here, the
+    -- PS/2 clock is only ~10 kHz and it would kill the frame.
+    -- ---------------------------------------------------------------------
+    process(clk)
     begin
         if rising_edge(clk) then
             if rst_int = '1' then
-                ps2_clk_sync  <= (others => '1');
-                ps2_data_sync <= (others => '1');
+                ps2_clk_sync  <= "11";
+                ps2_data_sync <= "11";
                 ps2_clk_hist  <= (others => '1');
                 ps2_clk_filt  <= '1';
                 ps2_clk_prev  <= '1';
             else
-                -- Stage 1 and 2: synchronizers
                 ps2_clk_sync(0)  <= ps2_clk;
                 ps2_clk_sync(1)  <= ps2_clk_sync(0);
                 ps2_data_sync(0) <= ps2_data;
                 ps2_data_sync(1) <= ps2_data_sync(0);
 
-                -- Glitch filter: history of the last 8 samples of the clock
                 ps2_clk_hist <= ps2_clk_hist(6 downto 0) & ps2_clk_sync(1);
                 if ps2_clk_hist = "11111111" then
                     ps2_clk_filt <= '1';
@@ -375,155 +300,123 @@ begin
                     ps2_clk_filt <= '0';
                 end if;
 
-                -- Previous value, used to find the falling edge
                 ps2_clk_prev <= ps2_clk_filt;
             end if;
         end if;
-    end process p_ps2_sync;
+    end process;
 
-    -- Falling edge of the filtered PS/2 clock: this is the moment when the data bit is valid
+    -- the data bit is valid on the falling edge of the keyboard clock
     ps2_fall <= ps2_clk_prev and (not ps2_clk_filt);
 
-    -- =====================================================================
-    -- 5. PS/2 RECEIVER
-    --    Frame = 11 bits, sent by the keyboard, one bit per falling clock edge:
-    --      bit 0     : start bit (always '0')
-    --      bits 1-8  : data, LSB first
-    --      bit 9     : parity (ODD parity: data + parity have an odd number of '1')
-    --      bit 10    : stop bit (always '1')
-    --    A byte is only accepted if start = 0, stop = 1 and the parity is right.
-    --    If the clock stays quiet for 2 ms in the middle of a frame the counter is
-    --    cleared, so the receiver can recover from any corrupted frame.
-    -- =====================================================================
-    p_ps2_rx : process(clk)
+    -- ---------------------------------------------------------------------
+    -- PS/2 receiver
+    -- Frame has 11 bits, one per falling edge:
+    --   0 = start ('0'), 1..8 = data (LSB first), 9 = odd parity, 10 = stop ('1')
+    -- A byte is accepted only if start, parity and stop are all correct.
+    -- If the clock stops for 2 ms in the middle of a frame we start over.
+    -- ---------------------------------------------------------------------
+    process(clk)
     begin
         if rising_edge(clk) then
-            ps2_byte_valid <= '0'; -- default: pulse of only 1 cycle
+            ps2_byte_valid <= '0';
 
             if rst_int = '1' then
                 ps2_bit_cnt <= 0;
-                ps2_shift   <= (others => '0');
-                ps2_par_calc <= '0';
-                ps2_par_bit  <= '0';
-                ps2_timeout  <= PS2_TIMEOUT;
-                ps2_byte     <= (others => '0');
+                ps2_timeout <= PS2_TIMEOUT;
             elsif ps2_fall = '1' then
                 ps2_timeout <= 0;
 
                 case ps2_bit_cnt is
                     when 0 =>
-                        -- Start bit: must be '0', otherwise stay waiting
-                        if ps2_data_sync(1) = '0' then
+                        if ps2_data_sync(1) = '0' then   -- valid start bit
                             ps2_par_calc <= '0';
                             ps2_bit_cnt  <= 1;
                         end if;
 
                     when 1 to 8 =>
-                        -- Data bits, LSB first: new bit enters on the left, shifts right
+                        -- new bit enters from the left, so the first one ends up in bit 0
                         ps2_shift    <= ps2_data_sync(1) & ps2_shift(7 downto 1);
                         ps2_par_calc <= ps2_par_calc xor ps2_data_sync(1);
                         ps2_bit_cnt  <= ps2_bit_cnt + 1;
 
                     when 9 =>
-                        -- Parity bit
                         ps2_par_bit <= ps2_data_sync(1);
                         ps2_bit_cnt <= 10;
 
                     when others =>
-                        -- Stop bit (bit 10): check stop = 1 and odd parity (xor of data+parity = 1)
+                        -- odd parity: data xor parity must be 1
                         if ps2_data_sync(1) = '1' and (ps2_par_calc xor ps2_par_bit) = '1' then
                             ps2_byte       <= ps2_shift;
                             ps2_byte_valid <= '1';
                         end if;
                         ps2_bit_cnt <= 0;
                 end case;
+            elsif ps2_timeout = PS2_TIMEOUT then
+                ps2_bit_cnt <= 0;
             else
-                -- No clock edge in this cycle: count time without activity
-                if ps2_timeout = PS2_TIMEOUT then
-                    ps2_bit_cnt <= 0; -- abandon an incomplete frame
-                else
-                    ps2_timeout <= ps2_timeout + 1;
-                end if;
+                ps2_timeout <= ps2_timeout + 1;
             end if;
         end if;
-    end process p_ps2_rx;
+    end process;
 
-    -- =====================================================================
-    -- 6. KEYBOARD DECODER (scan code set 2)
-    --    Pressing a key sends its MAKE code. Releasing sends F0 followed by the
-    --    same code (BREAK). Holding a key repeats the make code over and over
-    --    (typematic) without any F0. Extended keys are preceded by E0.
-    --    Rule used here:
-    --      * make code of a supported key -> generates ONE event (key_valid)
-    --        and the key is marked as "held";
-    --      * the same make code again while held -> typematic repeat, ignored;
-    --      * F0 + code of the held key -> key released, it can generate a new event;
-    --      * E0 codes (arrows, keypad ENTER...) and unknown codes are ignored.
-    -- =====================================================================
-    p_kbd : process(clk)
+    -- ---------------------------------------------------------------------
+    -- Keyboard decoder (scan code set 2)
+    -- Press = make code. Release = F0 + same code. Holding a key repeats the
+    -- make code with no F0 in between, so a key only generates an event if it
+    -- is not already marked as held. E0 (extended keys) is ignored.
+    -- ---------------------------------------------------------------------
+    process(clk)
         variable v_ascii : std_logic_vector(7 downto 0);
     begin
         if rising_edge(clk) then
-            key_valid <= '0'; -- default: pulse of only 1 cycle
+            key_valid <= '0';
 
             if rst_int = '1' then
-                kbd_break     <= '0';
-                kbd_ext       <= '0';
-                kbd_held      <= '0';
-                kbd_held_code <= (others => '0');
-                key_ascii     <= (others => '0');
+                kbd_break <= '0';
+                kbd_ext   <= '0';
+                kbd_held  <= '0';
             elsif ps2_byte_valid = '1' then
                 if ps2_byte = x"F0" then
-                    kbd_break <= '1';                 -- next code is a release
+                    kbd_break <= '1';
                 elsif ps2_byte = x"E0" then
-                    kbd_ext <= '1';                   -- next code belongs to an extended key
+                    kbd_ext <= '1';
                 else
-                    v_ascii   := scan_to_ascii(ps2_byte);
                     kbd_break <= '0';
                     kbd_ext   <= '0';
+                    v_ascii := scan_to_ascii(ps2_byte);
 
-                    if kbd_ext = '1' then
-                        null;                         -- extended key: ignored
-                    elsif kbd_break = '1' then
-                        -- Release: only the key that is being held is cleared
-                        if kbd_held = '1' and ps2_byte = kbd_held_code then
-                            kbd_held <= '0';
-                        end if;
-                    elsif v_ascii /= x"00" then
-                        -- Make code of a supported key
-                        if kbd_held = '1' and ps2_byte = kbd_held_code then
-                            null;                     -- typematic repeat: ignored
-                        else
-                            key_valid     <= '1';
-                            key_ascii     <= v_ascii;
-                            kbd_held      <= '1';
-                            kbd_held_code <= ps2_byte;
+                    if kbd_ext = '0' then
+                        if kbd_break = '1' then
+                            if ps2_byte = kbd_held_code then
+                                kbd_held <= '0';          -- key released
+                            end if;
+                        elsif v_ascii /= x"00" then
+                            if kbd_held = '0' or ps2_byte /= kbd_held_code then
+                                key_valid     <= '1';     -- new key press
+                                key_ascii     <= v_ascii;
+                                kbd_held      <= '1';
+                                kbd_held_code <= ps2_byte;
+                            end if;                       -- else: typematic repeat, ignore
                         end if;
                     end if;
                 end if;
             end if;
         end if;
-    end process p_kbd;
+    end process;
 
-    -- ENTER can come from the keyboard or from BTN_WEST. Letters only come from the keyboard.
     enter_evt  <= '1' when (key_valid = '1' and key_ascii = x"0D") or btn_pulse = '1' else '0';
     letter_evt <= '1' when (key_valid = '1' and key_ascii /= x"0D") else '0';
 
-    -- =====================================================================
-    -- 7. RANDOM NUMBER GENERATOR (LFSR)
-    --    8-bit Fibonacci LFSR, polynomial x^8 + x^6 + x^5 + x^4 + 1 (taps 8,6,5,4),
-    --    which is a maximal-length polynomial: it visits all 255 non-zero values
-    --    before repeating. The all-zeros value is the "lock-up" state of an XOR
-    --    LFSR, so the seed is non-zero (A5) and it can never reach zero.
-    --    It runs at 50 MHz all the time, so the value read when the player presses
-    --    ENTER depends on the exact instant of the key press (the pseudo-random part).
-    --    Conversion to a valid index 0..29 is done by the game controller
-    --    (state S_NEW_GAME): while value >= 30, subtract 30. For 1..255 this takes at most
-    --    8 clock cycles and the result is always in 0..29, so it can never point outside
-    --    the word table. (Small bias: indexes 0..15 are slightly more likely, since 255 is
-    --    not a multiple of 30. Not important for a game.)
-    -- =====================================================================
-    p_lfsr : process(clk)
+    -- ---------------------------------------------------------------------
+    -- LFSR
+    -- 8 bits, taps 8,6,5,4 (x^8 + x^6 + x^5 + x^4 + 1), maximal length: goes
+    -- through all 255 non-zero values. All zeros would lock it, so the seed
+    -- is A5. It runs all the time, so the value we grab when ENTER is pressed
+    -- depends on the exact moment of the press.
+    -- The 0..255 -> 0..29 conversion is done in S_NEW_GAME (subtract 30 until
+    -- the value is below 30), so the index is always valid.
+    -- ---------------------------------------------------------------------
+    process(clk)
     begin
         if rising_edge(clk) then
             if rst_int = '1' then
@@ -532,28 +425,18 @@ begin
                 lfsr <= lfsr(6 downto 0) & (lfsr(7) xor lfsr(5) xor lfsr(4) xor lfsr(3));
             end if;
         end if;
-    end process p_lfsr;
+    end process;
 
-    -- =====================================================================
-    -- 8. WORD DATABASE
-    --    The table is declared in section 2 (WORD_ROM and LEN_ROM). It is read here
-    --    combinationally with word_idx, so the synthesizer builds a small ROM in LUTs.
-    -- =====================================================================
+    -- ---------------------------------------------------------------------
+    -- Word database (tables are declared above)
+    -- ---------------------------------------------------------------------
     rom_word <= WORD_ROM(word_idx);
     rom_len  <= LEN_ROM(word_idx);
 
-    -- =====================================================================
-    -- 9. GAME CONTROLLER (main FSM)
-    --    S_INIT      : wait until the LCD finishes its initialization
-    --    S_IDLE      : title screen, wait for ENTER
-    --    S_NEW_GAME  : choose the word index (switches or LFSR mod 30)
-    --    S_LOAD_WORD : copy the word from the ROM and clear the game data
-    --    S_PLAYING   : process the letters typed by the player
-    --    S_WIN       : all letters found, ENTER = new game
-    --    S_LOSE      : 6 errors reached, ENTER = new game
-    --    This is the ONLY process that writes the game signals.
-    -- =====================================================================
-    p_game : process(clk)
+    -- ---------------------------------------------------------------------
+    -- Game controller
+    -- ---------------------------------------------------------------------
+    process(clk)
         variable v_idx   : integer range 0 to 25;
         variable v_found : boolean;
         variable v_all   : boolean;
@@ -561,15 +444,7 @@ begin
     begin
         if rising_edge(clk) then
             if rst_int = '1' then
-                game_state   <= S_INIT;
-                secret       <= (others => x"20");
-                secret_len   <= 0;
-                revealed     <= (others => '0');
-                used_letters <= (others => '0');
-                error_cnt    <= 0;
-                last_letter  <= x"20";
-                rand_val     <= 0;
-                word_idx     <= 0;
+                game_state <= S_INIT;
             else
                 case game_state is
 
@@ -580,19 +455,15 @@ begin
 
                     when S_IDLE =>
                         if enter_evt = '1' then
-                            rand_val   <= to_integer(unsigned(lfsr)); -- take a snapshot of the LFSR
+                            rand_val   <= to_integer(unsigned(lfsr));
                             game_state <= S_NEW_GAME;
                         end if;
 
                     when S_NEW_GAME =>
-                        if sw_sync1 /= "0000" then
-                            -- Test mode: switches 0001..1111 select words 0..14
-                            word_idx   <= to_integer(unsigned(sw_sync1)) - 1;
-                            game_state <= S_LOAD_WORD;
-                        elsif rand_val >= NUM_WORDS then
-                            rand_val <= rand_val - NUM_WORDS; -- subtract 30 until the value is below 30
+                        if rand_val >= NUM_WORDS then
+                            rand_val <= rand_val - NUM_WORDS;
                         else
-                            word_idx   <= rand_val;           -- valid index 0..29
+                            word_idx   <= rand_val;
                             game_state <= S_LOAD_WORD;
                         end if;
 
@@ -608,43 +479,38 @@ begin
                         game_state   <= S_PLAYING;
 
                     when S_PLAYING =>
-                        -- Only letters A-Z are processed. ENTER is ignored while playing.
-                        if letter_evt = '1' and
-                           unsigned(key_ascii) >= 65 and unsigned(key_ascii) <= 90 then
+                        if letter_evt = '1' then
+                            v_idx := to_integer(unsigned(key_ascii)) - 65;   -- A = 0 ... Z = 25
 
-                            v_idx := to_integer(unsigned(key_ascii)) - 65; -- A=0 ... Z=25
-
-                            -- A letter already used is ignored (does not cost an attempt)
+                            -- repeated letters are ignored, no penalty
                             if used_letters(v_idx) = '0' then
                                 used_letters(v_idx) <= '1';
                                 last_letter         <= key_ascii;
 
-                                -- Reveal every occurrence of the letter
+                                -- reveal all matches and check if the word is complete
                                 v_found := false;
+                                v_all   := true;
                                 v_rev   := revealed;
                                 for i in 0 to MAX_WORD_LEN-1 loop
-                                    if i < secret_len and secret(i) = key_ascii then
-                                        v_rev(i) := '1';
-                                        v_found  := true;
+                                    if i < secret_len then
+                                        if secret(i) = key_ascii then
+                                            v_rev(i) := '1';
+                                            v_found  := true;
+                                        end if;
+                                        if v_rev(i) = '0' then
+                                            v_all := false;
+                                        end if;
                                     end if;
                                 end loop;
                                 revealed <= v_rev;
 
                                 if v_found then
-                                    -- Win if every position of the word is revealed
-                                    v_all := true;
-                                    for i in 0 to MAX_WORD_LEN-1 loop
-                                        if i < secret_len and v_rev(i) = '0' then
-                                            v_all := false;
-                                        end if;
-                                    end loop;
                                     if v_all then
                                         game_state <= S_WIN;
                                     end if;
                                 else
-                                    -- Wrong letter: one more error
                                     error_cnt <= error_cnt + 1;
-                                    if error_cnt + 1 >= MAX_ERRORS then
+                                    if error_cnt = MAX_ERRORS - 1 then
                                         game_state <= S_LOSE;
                                     end if;
                                 end if;
@@ -658,37 +524,24 @@ begin
                         end if;
 
                     when others =>
-                        game_state <= S_INIT; -- protection against invalid states
+                        game_state <= S_INIT;
 
                 end case;
             end if;
         end if;
-    end process p_game;
+    end process;
 
-    -- =====================================================================
-    -- 10. LCD CONTROLLER
-    --     Display: 16x2 HD44780 compatible, 4-bit interface (DB7..DB4), write only (RW = 0).
-    --     Two independent blocks:
-    --       (a) p_lcd_format : writes what must be shown (32 characters) in lcd_buf,
-    --                          according to the game state. It never talks to the LCD.
-    --       (b) p_lcd_ctrl   : own FSM that initializes the LCD and then keeps rewriting
-    --                          the whole lcd_buf over and over (about every 1.8 ms).
-    --     So the game FSM only changes the buffer and never waits for the LCD.
-    -- =====================================================================
-
-    -- Free running counter used to alternate messages on the LOSE screen
-    p_blink : process(clk)
+    -- ---------------------------------------------------------------------
+    -- LCD screen: this process only fills lcd_buf (32 chars) from the game
+    -- state. The LCD FSM below keeps sending the buffer, so the game never
+    -- waits for the display. States not listed keep the old screen.
+    -- ---------------------------------------------------------------------
+    process(clk)
+        variable step : integer range 1 to 2;
     begin
         if rising_edge(clk) then
             blink_cnt <= blink_cnt + 1;
-        end if;
-    end process p_blink;
 
-    -- (a) Screen formatter. Each handled state writes all 32 positions in the same clock,
-    --     states that are not handled keep the previous screen (no blank flash).
-    p_lcd_format : process(clk)
-    begin
-        if rising_edge(clk) then
             case game_state is
 
                 when S_IDLE =>
@@ -698,37 +551,30 @@ begin
                     end loop;
 
                 when S_PLAYING =>
-                    -- Line 1: the word with '_' for the hidden letters.
-                    -- Words up to 8 letters use a space between letters, longer ones do not fit.
+                    -- line 1: word with '_' on hidden letters. Up to 8 letters get a
+                    -- space between them, bigger words would not fit in 16 columns.
+                    if secret_len <= 8 then
+                        step := 2;
+                    else
+                        step := 1;
+                    end if;
                     for i in 0 to 15 loop
                         lcd_buf(i) <= x"20";
                     end loop;
-                    if secret_len <= 8 then
-                        for i in 0 to 7 loop
-                            if i < secret_len then
-                                if revealed(i) = '1' then
-                                    lcd_buf(2*i) <= secret(i);
-                                else
-                                    lcd_buf(2*i) <= chr('_');
-                                end if;
+                    for i in 0 to MAX_WORD_LEN-1 loop
+                        if i < secret_len then
+                            if revealed(i) = '1' then
+                                lcd_buf(i * step) <= secret(i);
+                            else
+                                lcd_buf(i * step) <= chr('_');
                             end if;
-                        end loop;
-                    else
-                        for i in 0 to MAX_WORD_LEN-1 loop
-                            if i < secret_len then
-                                if revealed(i) = '1' then
-                                    lcd_buf(i) <= secret(i);
-                                else
-                                    lcd_buf(i) <= chr('_');
-                                end if;
-                            end if;
-                        end loop;
-                    end if;
-                    -- Line 2: "ERROS: 0X/06 [L]" (X = errors, L = last letter typed)
+                        end if;
+                    end loop;
+                    -- line 2: "ERROS: 0X/06 [L]"
                     for i in 0 to 15 loop
                         lcd_buf(16 + i) <= chr(MSG_ERRORS(i+1));
                     end loop;
-                    lcd_buf(16 + 8)  <= std_logic_vector(to_unsigned(48 + error_cnt, 8)); -- '0' + errors
+                    lcd_buf(16 + 8)  <= std_logic_vector(to_unsigned(48 + error_cnt, 8));
                     lcd_buf(16 + 14) <= last_letter;
 
                 when S_WIN =>
@@ -738,65 +584,57 @@ begin
                     end loop;
 
                 when S_LOSE =>
+                    -- line 2 alternates between the answer and the restart hint
                     for i in 0 to 15 loop
                         lcd_buf(i) <= chr(MSG_LOSE(i+1));
-                    end loop;
-                    if blink_cnt(BLINK_BIT) = '0' then
-                        -- Show the correct word: "ERA: WORD"
-                        for i in 0 to 15 loop
+                        if blink_cnt(26) = '0' then
                             lcd_buf(16 + i) <= chr(MSG_ANSWER(i+1));
-                        end loop;
+                        else
+                            lcd_buf(16 + i) <= chr(MSG_NEWGAME(i+1));
+                        end if;
+                    end loop;
+                    if blink_cnt(26) = '0' then
                         for i in 0 to MAX_WORD_LEN-1 loop
                             if i < secret_len then
                                 lcd_buf(16 + 5 + i) <= secret(i);
                             end if;
                         end loop;
-                    else
-                        for i in 0 to 15 loop
-                            lcd_buf(16 + i) <= chr(MSG_NEWGAME(i+1));
-                        end loop;
                     end if;
 
                 when others =>
-                    null; -- S_INIT, S_NEW_GAME, S_LOAD_WORD: keep what is on the buffer
+                    null;
 
             end case;
         end if;
-    end process p_lcd_format;
+    end process;
 
-    -- (b) LCD driver FSM.
-    --     The sequence is a list of "steps" (lcd_seq):
-    --       0 to 3   : initialization nibbles 3,3,3,2 (4-bit mode, "initialization by instruction")
-    --       4        : Function Set 0x28 (4-bit, 2 lines, 5x8 font)
-    --       5        : Entry Mode Set 0x06 (cursor moves right)
-    --       6        : Display ON 0x0C (cursor off)
-    --       7        : Clear Display 0x01 (slow command, ~1.64 ms)
-    --       8        : set cursor to line 1 (0x80)
-    --       9 to 24  : 16 characters of line 1
-    --       25       : set cursor to line 2 (0xC0)
-    --       26 to 41 : 16 characters of line 2
-    --     After step 41 it goes back to step 8, refreshing the screen forever.
-    --     Each byte = high nibble + low nibble. Each nibble = setup (RS/data), E pulse, gap.
-    p_lcd_ctrl : process(clk)
+    -- ---------------------------------------------------------------------
+    -- LCD driver FSM (HD44780, 4-bit mode, write only)
+    -- Steps (lcd_seq):
+    --    0..3   init nibbles 3,3,3,2
+    --    4      function set 0x28
+    --    5      entry mode 0x06
+    --    6      display on 0x0C
+    --    7      clear 0x01
+    --    8      cursor to line 1 (0x80)
+    --    9..24  line 1 chars
+    --    25     cursor to line 2 (0xC0)
+    --    26..41 line 2 chars
+    -- After step 41 it goes back to 8 and refreshes the screen forever.
+    -- Each byte is sent as two nibbles: setup -> E pulse -> gap.
+    -- ---------------------------------------------------------------------
+    process(clk)
     begin
         if rising_edge(clk) then
             if rst_int = '1' then
-                lcd_state     <= L_POWER_ON;
-                lcd_timer     <= LCD_POWER_ON;
-                lcd_seq       <= 0;
-                lcd_phase_low <= '0';
-                lcd_nib_only  <= '0';
-                lcd_tx_byte   <= (others => '0');
-                lcd_tx_rs     <= '0';
-                lcd_tx_wait   <= 0;
-                lcd_ready     <= '0';
-                lcd_e_r       <= '0';
-                lcd_rs_r      <= '0';
-                lcd_data_r    <= (others => '0');
+                lcd_state <= L_POWER_ON;
+                lcd_timer <= LCD_POWER_ON;
+                lcd_seq   <= 0;
+                lcd_ready <= '0';
+                lcd_e     <= '0';
             else
                 case lcd_state is
 
-                    -- Wait for the LCD power-up (>15 ms)
                     when L_POWER_ON =>
                         if lcd_timer = 0 then
                             lcd_state <= L_LOAD;
@@ -804,103 +642,100 @@ begin
                             lcd_timer <= lcd_timer - 1;
                         end if;
 
-                    -- Prepare the byte of the current step (byte, RS and wait time after it)
+                    -- choose byte, RS and wait time for the current step
                     when L_LOAD =>
                         lcd_phase_low <= '0';
                         lcd_nib_only  <= '0';
                         lcd_tx_rs     <= '0';
                         lcd_tx_wait   <= LCD_WAIT_50US;
-
                         if lcd_seq <= 3 then
-                            lcd_nib_only <= '1'; -- only the high nibble is sent
-                            case lcd_seq is
-                                when 0 =>
-                                    lcd_tx_byte <= x"30";
-                                    lcd_tx_wait <= LCD_WAIT_5MS;
-                                when 1 =>
-                                    lcd_tx_byte <= x"30";
-                                    lcd_tx_wait <= LCD_WAIT_200US;
-                                when 2 =>
-                                    lcd_tx_byte <= x"30";
-                                    lcd_tx_wait <= LCD_WAIT_100US;
-                                when others =>
-                                    lcd_tx_byte <= x"20"; -- switch to 4-bit mode
-                                    lcd_tx_wait <= LCD_WAIT_100US;
-                            end case;
-                        elsif lcd_seq = 4 then
-                            lcd_tx_byte <= x"28";
-                        elsif lcd_seq = 5 then
-                            lcd_tx_byte <= x"06";
-                        elsif lcd_seq = 6 then
-                            lcd_tx_byte <= x"0C";
-                        elsif lcd_seq = 7 then
-                            lcd_tx_byte <= x"01";
-                            lcd_tx_wait <= LCD_WAIT_2MS;
-                        elsif lcd_seq = 8 then
-                            lcd_tx_byte <= x"80";                  -- DDRAM address 0x00 (line 1)
-                        elsif lcd_seq <= 24 then
-                            lcd_tx_rs   <= '1';
-                            lcd_tx_byte <= lcd_buf(lcd_seq - 9);   -- chars 0..15
-                        elsif lcd_seq = 25 then
-                            lcd_tx_byte <= x"C0";                  -- DDRAM address 0x40 (line 2)
-                        else
-                            lcd_tx_rs   <= '1';
-                            lcd_tx_byte <= lcd_buf(lcd_seq - 10);  -- chars 16..31
+                            lcd_nib_only <= '1';
                         end if;
 
-                        lcd_timer <= LCD_T_SETUP;
+                        case lcd_seq is
+                            when 0 =>
+                                lcd_tx_byte <= x"30";
+                                lcd_tx_wait <= LCD_WAIT_5MS;
+                            when 1 =>
+                                lcd_tx_byte <= x"30";
+                                lcd_tx_wait <= LCD_WAIT_200US;
+                            when 2 =>
+                                lcd_tx_byte <= x"30";
+                                lcd_tx_wait <= LCD_WAIT_100US;
+                            when 3 =>
+                                lcd_tx_byte <= x"20";             -- go to 4-bit mode
+                                lcd_tx_wait <= LCD_WAIT_100US;
+                            when 4 =>
+                                lcd_tx_byte <= x"28";
+                            when 5 =>
+                                lcd_tx_byte <= x"06";
+                            when 6 =>
+                                lcd_tx_byte <= x"0C";
+                            when 7 =>
+                                lcd_tx_byte <= x"01";
+                                lcd_tx_wait <= LCD_WAIT_2MS;      -- clear is slow
+                            when 8 =>
+                                lcd_tx_byte <= x"80";
+                            when 9 to 24 =>
+                                lcd_tx_rs   <= '1';
+                                lcd_tx_byte <= lcd_buf(lcd_seq - 9);
+                            when 25 =>
+                                lcd_tx_byte <= x"C0";
+                            when others =>
+                                lcd_tx_rs   <= '1';
+                                lcd_tx_byte <= lcd_buf(lcd_seq - 10);
+                        end case;
+
+                        lcd_timer <= 4;
                         lcd_state <= L_SETUP;
 
-                    -- Put RS and the nibble on the bus with E low (setup time before E)
+                    -- RS and data first, E still low (needs > 40 ns)
                     when L_SETUP =>
-                        lcd_e_r  <= '0';
-                        lcd_rs_r <= lcd_tx_rs;
+                        lcd_e  <= '0';
+                        lcd_rs <= lcd_tx_rs;
                         if lcd_phase_low = '0' then
-                            lcd_data_r <= lcd_tx_byte(7 downto 4);
+                            lcd_db <= lcd_tx_byte(7 downto 4);
                         else
-                            lcd_data_r <= lcd_tx_byte(3 downto 0);
+                            lcd_db <= lcd_tx_byte(3 downto 0);
                         end if;
                         if lcd_timer = 0 then
-                            lcd_timer <= LCD_T_EHIGH;
+                            lcd_timer <= 12;                      -- E high for 13 cycles = 260 ns
                             lcd_state <= L_E_HIGH;
                         else
                             lcd_timer <= lcd_timer - 1;
                         end if;
 
-                    -- E pulse (the LCD reads the nibble on the falling edge of E)
                     when L_E_HIGH =>
-                        lcd_e_r <= '1';
+                        lcd_e <= '1';
                         if lcd_timer = 0 then
-                            lcd_timer <= LCD_T_GAP;
+                            lcd_timer <= 50;                      -- ~1 us gap
                             lcd_state <= L_E_LOW;
                         else
                             lcd_timer <= lcd_timer - 1;
                         end if;
 
-                    -- E low, data hold and 1 us gap; then low nibble or wait after the byte
                     when L_E_LOW =>
-                        lcd_e_r <= '0';
+                        lcd_e <= '0';
                         if lcd_timer = 0 then
                             if lcd_nib_only = '0' and lcd_phase_low = '0' then
-                                lcd_phase_low <= '1';          -- now send the low nibble
-                                lcd_timer     <= LCD_T_SETUP;
+                                lcd_phase_low <= '1';             -- now the low nibble
+                                lcd_timer     <= 4;
                                 lcd_state     <= L_SETUP;
                             else
-                                lcd_timer <= lcd_tx_wait;      -- command execution time
+                                lcd_timer <= lcd_tx_wait;
                                 lcd_state <= L_WAIT;
                             end if;
                         else
                             lcd_timer <= lcd_timer - 1;
                         end if;
 
-                    -- Wait for the LCD to execute the command, then go to the next step
                     when L_WAIT =>
                         if lcd_timer = 0 then
                             if lcd_seq = 7 then
-                                lcd_ready <= '1';              -- init finished (clear display done)
+                                lcd_ready <= '1';                 -- clear done, init finished
                             end if;
                             if lcd_seq = LCD_LAST_STEP then
-                                lcd_seq <= 8;                  -- refresh loop
+                                lcd_seq <= 8;
                             else
                                 lcd_seq <= lcd_seq + 1;
                             end if;
@@ -916,67 +751,35 @@ begin
                 end case;
             end if;
         end if;
-    end process p_lcd_ctrl;
+    end process;
 
-    -- =====================================================================
-    -- 11. LED CONTROLLER
-    --     led(2 downto 0) : number of errors in binary (0 to 6)
-    --     led(3)          : game in progress (S_PLAYING)
-    --     led(4)          : PS/2 activity (lights ~80 ms whenever a valid byte arrives)
-    --     led(5)          : LCD initialized (ready)
-    --     led(6)          : player WON
-    --     led(7)          : player LOST
-    -- =====================================================================
-    p_led : process(clk)
+    lcd_rw <= '0';
+
+    -- ---------------------------------------------------------------------
+    -- LEDs
+    --   led(2..0) errors in binary (0 to 6)
+    --   led(3)    playing
+    --   led(4)    toggles on every key press (to check the keyboard)
+    --   led(5)    LCD initialized
+    --   led(6)    win
+    --   led(7)    lose
+    -- ---------------------------------------------------------------------
+    process(clk)
     begin
         if rising_edge(clk) then
             if rst_int = '1' then
-                led_reg     <= (others => '0');
-                key_led_cnt <= 0;
-            else
-                led_reg(2 downto 0) <= std_logic_vector(to_unsigned(error_cnt, 3));
-
-                if game_state = S_PLAYING then
-                    led_reg(3) <= '1';
-                else
-                    led_reg(3) <= '0';
-                end if;
-
-                if ps2_byte_valid = '1' then
-                    key_led_cnt <= KEY_LED_TIME;
-                elsif key_led_cnt > 0 then
-                    key_led_cnt <= key_led_cnt - 1;
-                end if;
-                if key_led_cnt > 0 then
-                    led_reg(4) <= '1';
-                else
-                    led_reg(4) <= '0';
-                end if;
-
-                led_reg(5) <= lcd_ready;
-
-                if game_state = S_WIN then
-                    led_reg(6) <= '1';
-                else
-                    led_reg(6) <= '0';
-                end if;
-
-                if game_state = S_LOSE then
-                    led_reg(7) <= '1';
-                else
-                    led_reg(7) <= '0';
-                end if;
+                key_led <= '0';
+            elsif key_valid = '1' then
+                key_led <= not key_led;
             end if;
         end if;
-    end process p_led;
+    end process;
 
-    -- =====================================================================
-    -- 12. OUTPUT ASSIGNMENTS
-    -- =====================================================================
-    lcd_e  <= lcd_e_r;
-    lcd_rs <= lcd_rs_r;
-    lcd_rw <= '0';          -- write only: never read the LCD
-    lcd_db <= lcd_data_r;
-    led    <= led_reg;
+    led(2 downto 0) <= std_logic_vector(to_unsigned(error_cnt, 3));
+    led(3) <= '1' when game_state = S_PLAYING else '0';
+    led(4) <= key_led;
+    led(5) <= lcd_ready;
+    led(6) <= '1' when game_state = S_WIN  else '0';
+    led(7) <= '1' when game_state = S_LOSE else '0';
 
 end Behavioral;
