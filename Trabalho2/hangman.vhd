@@ -171,7 +171,7 @@ architecture Behavioral of hangman is
     signal ps2_shift      : std_logic_vector(7 downto 0) := (others => '0');
     signal ps2_par_calc   : std_logic := '0';
     signal ps2_par_bit    : std_logic := '0';
-    signal ps2_timeout    : integer range 0 to PS2_TIMEOUT := PS2_TIMEOUT;
+    signal ps2_timeout_sig    : integer range 0 to PS2_TIMEOUT := PS2_TIMEOUT;
     signal ps2_byte       : std_logic_vector(7 downto 0) := (others => '0');
     signal ps2_byte_valid : std_logic := '0';
 
@@ -322,9 +322,9 @@ begin
 
             if rst_int = '1' then
                 ps2_bit_cnt <= 0;
-                ps2_timeout <= PS2_TIMEOUT;
+                ps2_timeout_sig <= PS2_TIMEOUT;
             elsif ps2_fall = '1' then
-                ps2_timeout <= 0;
+                ps2_timeout_sig <= 0;
 
                 case ps2_bit_cnt is
                     when 0 =>
@@ -351,10 +351,10 @@ begin
                         end if;
                         ps2_bit_cnt <= 0;
                 end case;
-            elsif ps2_timeout = PS2_TIMEOUT then
+            elsif ps2_timeout_sig = PS2_TIMEOUT then
                 ps2_bit_cnt <= 0;
             else
-                ps2_timeout <= ps2_timeout + 1;
+                ps2_timeout_sig <= ps2_timeout_sig + 1;
             end if;
         end if;
     end process;
